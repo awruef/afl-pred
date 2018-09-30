@@ -108,6 +108,94 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   int inst_blocks = 0;
 
+  // Return value instrumentation. 
+  for (auto &F : M) 
+    for (auto &BB : F) {
+      for (auto &I : BB) {
+        if (ReturnInst *R = dyn_cast<ReturnInst>(&I)) {
+          if (Value *RV = R->getReturnValue()) {
+            
+            if (AFL_R(100) >= inst_ratio) continue;
+
+            // We want to insert instrumentation before the return value.
+            IRBuilder<> IRB(R); 
+
+            unsigned int cur_loc = AFL_R(MAP_SIZE);
+
+            ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+
+            LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+            PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+            Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
+
+            LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
+            MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+            Value *MapPtrIdx =
+              IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+
+            // Is the return value a pointer, or not? 
+            if (RV->getType()->isPointerTy()) {
+              // Add instrumentation that checks whether or not the value is 
+              // NULL, and ANDs it into the current map idx.
+             
+              // First, get the counter value. 
+              LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+              Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      
+              // Then, compute the value we want to OR in, by using cmp and select.
+              Value *RTBC = IRB.CreateBitCast(RV, IRB.getInt64Ty());
+              Value *NV = ConstantInt::get(IRB.getInt64Ty(), 0);
+              Value *IsNull = IRB.CreateICmpEQ(RTBC, NV);
+              Value *IsNullV = ConstantInt::get(IRB.getInt8Ty(), 1);
+              Value *IsNonNullV = ConstantInt::get(IRB.getInt8Ty(), 2);
+              Value *SelectedV = IRB.CreateSelect(IsNull, IsNullV, IsNonNullV);
+              Value *ORedV = IRB.CreateOr(Counter, SelectedV);
+
+              // Write that value back into the map.
+              IRB.CreateStore(ORedV, MapPtrIdx)
+                ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+            } else {
+              // First, get the counter value. 
+              LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+              Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+ 
+              // Add instrumentation that records the signed-ness of the value,
+              // and ORit into the current map idx. 
+              Value *Z = ConstantInt::get(RV->getType(), 0); 
+              Value *ReqZ = IRB.CreateICmpEQ(RV, Z);
+              Value *RltZ = IRB.CreateICmpSLT(RV, Z);
+              Value *RgtZ = IRB.CreateICmpSGT(RV, Z);
+
+              Value *IsREqZ = ConstantInt::get(IRB.getInt8Ty(), 1);
+              Value *IsNotREqZ = ConstantInt::get(IRB.getInt8Ty(), 2);
+              Value *IsRltZ = ConstantInt::get(IRB.getInt8Ty(), 3);
+              Value *IsNotRltZ = ConstantInt::get(IRB.getInt8Ty(), 4);
+              Value *IsRgtZ = ConstantInt::get(IRB.getInt8Ty(), 5);
+              Value *IsNotRgtZ = ConstantInt::get(IRB.getInt8Ty(), 6);
+
+              Value *S1v = IRB.CreateSelect(ReqZ, IsREqZ, IsNotREqZ);
+              Value *S2v = IRB.CreateSelect(RltZ, IsRltZ, IsNotRltZ);
+              Value *S3v = IRB.CreateSelect(RgtZ, IsRgtZ, IsNotRgtZ);
+              Value *t1 = IRB.CreateOr(S1v, S2v);
+              Value *t2 = IRB.CreateOr(S3v, t1);
+              Value *ORedV = IRB.CreateOr(Counter, t2);
+
+              // Write that value back into the map.
+              IRB.CreateStore(ORedV, MapPtrIdx)
+                ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+            }
+
+            StoreInst *Store =
+                IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
+            Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+            inst_blocks++;
+          }
+        }
+      }
+    }
+
+  // Edge instrumentation. 
   for (auto &F : M)
     for (auto &BB : F) {
 
