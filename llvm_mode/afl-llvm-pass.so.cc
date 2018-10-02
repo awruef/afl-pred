@@ -134,7 +134,14 @@ bool AFLCoverage::runOnModule(Module &M) {
               IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
 
             // Is the return value a pointer, or not? 
-            if (RV->getType()->isPointerTy()) {
+            if (RV->getType()->isFloatTy() || 
+                (RV->getType()->isIntegerTy() && !(RV->getType()->getScalarSizeInBits() > 1)) ||
+                RV->getType()->isStructTy() || 
+                RV->getType()->isVectorTy())
+            {
+              // If it's one of these cases, then skip it. 
+              continue;
+            } else if (RV->getType()->isPointerTy()) {
               // Add instrumentation that checks whether or not the value is 
               // NULL, and ANDs it into the current map idx.
              
@@ -191,6 +198,61 @@ bool AFLCoverage::runOnModule(Module &M) {
 
             inst_blocks++;
           }
+        }
+      }
+    }
+
+  // Assignment instrumentation. 
+  for (auto &F : M )
+    for (auto &BB :F ) { 
+      IRBuilder<>           IRB(&(*BB.getFirstInsertionPt()));
+      std::vector<PHINode*> phis;
+
+      // Are there any Phi nodes in this basic block? 
+      auto j = BB.getFirstNonPHI();
+      for (auto i = BB.begin(); &*i != j; ++i) 
+        if (PHINode *k = dyn_cast<PHINode>(&*i))
+          if (k->getType()->isIntegerTy() || k->getType()->isPointerTy())
+            phis.push_back(k); 
+
+      for (auto p : phis) {
+        // We need to insert a sequence of binary checks. The operands for 
+        // the checks: the lhs is the phi node itself, and each of the rhs
+        // is from the phis incoming operands. Each phi value gets a new
+        // location. 
+        
+        Value *AssignLHS = p; 
+        for (auto &i : p->incoming_values()) {
+          if (AFL_R(100) >= inst_ratio) continue;
+
+          unsigned int cur_loc = AFL_R(MAP_SIZE);
+
+          ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+
+          LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+          PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+          Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
+
+          LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
+          MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+          Value *MapPtrIdx =
+              IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+
+          LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+          Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+          Value *ORed = nullptr;
+          IRB.CreateStore(ORed, MapPtrIdx)
+              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+          /* Set prev_loc to cur_loc >> 1 */
+
+          StoreInst *Store =
+              IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
+          Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+          inst_blocks++;
+        
         }
       }
     }
