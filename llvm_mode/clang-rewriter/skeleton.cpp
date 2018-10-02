@@ -49,7 +49,24 @@ private:
   string  File;
 };
 
+class SkeletonVisitor : public RecursiveASTVisitor<SkeletonVisitor> {
+  ASTContext *Ctx;
+public:
+  explicit SkeletonVisitor(ASTContext *C) : Ctx(C) {}
+
+  bool VisitBinAssign(BinaryOperator *);
+};
+
+bool SkeletonVisitor::VisitBinAssign(BinaryOperator *O) {
+
+  return true;
+}
+
 void TransformConsumer::HandleTranslationUnit(ASTContext &C) {
+  SkeletonVisitor S(&C);
+
+  for (const auto &D : C.getTranslationUnitDecl()->decls())
+    S.TraverseDecl(D);
 
   return;
 }
