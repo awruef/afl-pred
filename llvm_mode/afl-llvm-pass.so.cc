@@ -202,60 +202,111 @@ bool AFLCoverage::runOnModule(Module &M) {
       }
     }
 
-  // Assignment instrumentation. 
-  for (auto &F : M )
-    for (auto &BB :F ) { 
-      IRBuilder<>           IRB(&(*BB.getFirstInsertionPt()));
-      std::vector<PHINode*> phis;
+  // Parameter instrumentation.
+  for (auto &F : M) {
+    if (F.isVarArg())
+      continue;
 
-      // Are there any Phi nodes in this basic block? 
-      auto j = BB.getFirstNonPHI();
-      for (auto i = BB.begin(); &*i != j; ++i) 
-        if (PHINode *k = dyn_cast<PHINode>(&*i))
-          if (k->getType()->isIntegerTy() || k->getType()->isPointerTy())
-            phis.push_back(k); 
+    if (F.size() == 0)
+      continue;
 
-      for (auto p : phis) {
-        // We need to insert a sequence of binary checks. The operands for 
-        // the checks: the lhs is the phi node itself, and each of the rhs
-        // is from the phis incoming operands. Each phi value gets a new
-        // location. 
-        
-        Value *AssignLHS = p; 
-        for (auto &i : p->incoming_values()) {
-          if (AFL_R(100) >= inst_ratio) continue;
+    BasicBlock &BB = F.getEntryBlock();
 
-          unsigned int cur_loc = AFL_R(MAP_SIZE);
+    BasicBlock::iterator IP = BB.getFirstInsertionPt();
+    IRBuilder<> IRB(&(*IP));
 
-          ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
-
-          LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
-          PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-          Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
-
-          LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
-          MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-          Value *MapPtrIdx =
-              IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
-
-          LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
-          Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-          Value *ORed = nullptr;
-          IRB.CreateStore(ORed, MapPtrIdx)
-              ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-          /* Set prev_loc to cur_loc >> 1 */
-
-          StoreInst *Store =
-              IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
-          Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-          inst_blocks++;
-        
-        }
-      }
+    std::vector<Value *> intParms;
+    std::vector<Value *> ptrParms;
+    // Get the parameter list for this function and make two sets: the 
+    // integer type parameters and the pointer type parameters.
+    for (auto &V : F.args()) {
+      uint64_t tw = M.getDataLayout().getTypeAllocSizeInBits(V.getType());
+      if (V.getType()->isPointerTy())
+        ptrParms.push_back(&V);
+      else if(V.getType()->isIntegerTy() && tw > 1)
+        intParms.push_back(&V);
     }
+
+    // If there is more than one of either, add comparisons between them.
+    std::vector<std::pair<Value *, Value *>> instrumentPairs;
+    if (intParms.size() > 1) 
+      for( unsigned i = 0 ; i < intParms.size() - 1; i++) 
+        for (unsigned j = i; j < intParms.size(); j++) 
+          instrumentPairs.push_back(std::make_pair(intParms[i], intParms[j]));
+
+    if (ptrParms.size() > 1) 
+      for( unsigned i = 0 ; i < ptrParms.size() - 1; i++) 
+        for (unsigned j = i; j < ptrParms.size(); j++) 
+          instrumentPairs.push_back(std::make_pair(ptrParms[i], ptrParms[j]));
+
+    for (auto &P : instrumentPairs) {
+      // Each P is its own instrument point. 
+      Value *RHS = P.first; 
+      Value *LHS = P.second;
+
+      unsigned int cur_loc = AFL_R(MAP_SIZE);
+
+      ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+
+      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+      PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
+
+      LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
+      MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      Value *MapPtrIdx =
+        IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+ 
+      if (RHS->getType()->isPointerTy()) {
+        LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+        Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      
+        Value *RTBC = IRB.CreateBitCast(RHS, IRB.getInt64Ty());
+        Value *LTBC = IRB.CreateBitCast(LHS, IRB.getInt64Ty());
+        Value *IsNull = IRB.CreateICmpEQ(RTBC, LTBC);
+        Value *IsNullV = ConstantInt::get(IRB.getInt8Ty(), 1);
+        Value *IsNonNullV = ConstantInt::get(IRB.getInt8Ty(), 2);
+        Value *SelectedV = IRB.CreateSelect(IsNull, IsNullV, IsNonNullV);
+        Value *ORedV = IRB.CreateOr(Counter, SelectedV);
+
+        IRB.CreateStore(ORedV, MapPtrIdx)
+          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      } else {
+        LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+        Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+ 
+        //Value *Z = ConstantInt::get(RV->getType(), 0); 
+        Value *LHSi = IRB.CreateSExt(LHS, IRB.getInt64Ty());
+        Value *RHSi = IRB.CreateSExt(RHS, IRB.getInt64Ty());
+        Value *LeqR = IRB.CreateICmpEQ(LHSi, RHSi);
+        Value *LltR = IRB.CreateICmpSLT(LHSi, RHSi);
+        Value *LgtR = IRB.CreateICmpSGT(LHSi, RHSi);
+
+        Value *IsLEqR = ConstantInt::get(IRB.getInt8Ty(), 1);
+        Value *IsNotLEqR = ConstantInt::get(IRB.getInt8Ty(), 2);
+        Value *IsLltR = ConstantInt::get(IRB.getInt8Ty(), 3);
+        Value *IsNotLltR = ConstantInt::get(IRB.getInt8Ty(), 4);
+        Value *IsLgtR = ConstantInt::get(IRB.getInt8Ty(), 5);
+        Value *IsNotLgtR = ConstantInt::get(IRB.getInt8Ty(), 6);
+
+        Value *S1v = IRB.CreateSelect(LeqR, IsLEqR, IsNotLEqR);
+        Value *S2v = IRB.CreateSelect(LltR, IsLltR, IsNotLltR);
+        Value *S3v = IRB.CreateSelect(LgtR, IsLgtR, IsNotLgtR);
+        Value *t1 = IRB.CreateOr(S1v, S2v);
+        Value *t2 = IRB.CreateOr(S3v, t1);
+        Value *ORedV = IRB.CreateOr(Counter, t2);
+
+        IRB.CreateStore(ORedV, MapPtrIdx)
+          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+      }
+
+      StoreInst *Store =
+        IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
+      Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+      inst_blocks++;
+    }
+  }
 
   // Edge instrumentation. 
   for (auto &F : M)

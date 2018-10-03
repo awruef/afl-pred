@@ -58,7 +58,7 @@ public:
 };
 
 bool SkeletonVisitor::VisitBinAssign(BinaryOperator *O) {
-
+  O->dump();
   return true;
 }
 
