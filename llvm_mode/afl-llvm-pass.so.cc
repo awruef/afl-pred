@@ -249,6 +249,7 @@ bool AFLCoverage::runOnModule(Module &M) {
  
       if (RHS->getType()->isPointerTy()) {
         LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+        Counter->setVolatile(true);
         Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
      
         Value *RTBC = IRB.CreatePtrToInt(RHS, IRB.getInt64Ty());
@@ -259,11 +260,13 @@ bool AFLCoverage::runOnModule(Module &M) {
         Value *SelectedV = IRB.CreateSelect(IsEq, IsEqV, IsNonEqV);
         Value *ORedV = IRB.CreateOr(Counter, SelectedV);
 
-        IRB.CreateStore(ORedV, MapPtrIdx)
-          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        StoreInst *Store = IRB.CreateStore(ORedV, MapPtrIdx);
+        Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        Store->setVolatile(true);
       } else {
         LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
         Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        Counter->setVolatile(true);
  
         Value *LeqR = IRB.CreateICmpEQ(LHS, RHS);
         Value *LltR = IRB.CreateICmpSLT(LHS, RHS);
@@ -279,12 +282,12 @@ bool AFLCoverage::runOnModule(Module &M) {
         Value *S1v = IRB.CreateSelect(LeqR, IsLEqR, IsNotLEqR);
         Value *S2v = IRB.CreateSelect(LltR, IsLltR, IsNotLltR);
         Value *S3v = IRB.CreateSelect(LgtR, IsLgtR, IsNotLgtR);
-        Value *t1 = IRB.CreateOr(S1v, S2v);
-        Value *t2 = IRB.CreateOr(t1, S3v);
-        Value *ORedV = IRB.CreateOr(Counter, t2);
-
-        IRB.CreateStore(ORedV, MapPtrIdx)
-          ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        Value *t1 = IRB.CreateOr(Counter, S1v);
+        Value *t2 = IRB.CreateOr(t1, S2v);
+        Value *t3 = IRB.CreateOr(t2, S3v);
+        StoreInst *Store = IRB.CreateStore(t3, MapPtrIdx);
+        Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+        Store->setVolatile(true);
       }
 
       inst_blocks++;
