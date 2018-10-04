@@ -100,14 +100,15 @@ bool AFLCoverage::runOnModule(Module &M) {
       new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
                          GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
 
-  GlobalVariable *AFLPrevLoc = new GlobalVariable(
+  /*GlobalVariable *AFLPrevLoc = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc",
-      0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+      0, GlobalVariable::GeneralDynamicTLSModel, 0, false);*/
 
   /* Instrument all the things! */
 
   int inst_blocks = 0;
 
+#if 0
   // Return value instrumentation. 
   for (auto &F : M) 
     for (auto &BB : F) {
@@ -120,18 +121,14 @@ bool AFLCoverage::runOnModule(Module &M) {
             // We want to insert instrumentation before the return value.
             IRBuilder<> IRB(R); 
 
-            unsigned int cur_loc = AFL_R(MAP_SIZE);
+            unsigned int cur_loc = AFL_R(MAP_SIZE/4) + (MAP_SIZE - (MAP_SIZE/4));
 
             ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
-            LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
-            PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-            Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
 
             LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
             MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-            Value *MapPtrIdx =
-              IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+            Value *MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
 
             // Is the return value a pointer, or not? 
             if (RV->getType()->isFloatTy() || 
@@ -175,10 +172,10 @@ bool AFLCoverage::runOnModule(Module &M) {
 
               Value *IsREqZ = ConstantInt::get(IRB.getInt8Ty(), 1);
               Value *IsNotREqZ = ConstantInt::get(IRB.getInt8Ty(), 2);
-              Value *IsRltZ = ConstantInt::get(IRB.getInt8Ty(), 3);
-              Value *IsNotRltZ = ConstantInt::get(IRB.getInt8Ty(), 4);
-              Value *IsRgtZ = ConstantInt::get(IRB.getInt8Ty(), 5);
-              Value *IsNotRgtZ = ConstantInt::get(IRB.getInt8Ty(), 6);
+              Value *IsRltZ = ConstantInt::get(IRB.getInt8Ty(), 4);
+              Value *IsNotRltZ = ConstantInt::get(IRB.getInt8Ty(), 8);
+              Value *IsRgtZ = ConstantInt::get(IRB.getInt8Ty(), 16);
+              Value *IsNotRgtZ = ConstantInt::get(IRB.getInt8Ty(), 32);
 
               Value *S1v = IRB.CreateSelect(ReqZ, IsREqZ, IsNotREqZ);
               Value *S2v = IRB.CreateSelect(RltZ, IsRltZ, IsNotRltZ);
@@ -192,16 +189,12 @@ bool AFLCoverage::runOnModule(Module &M) {
                 ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
             }
 
-            StoreInst *Store =
-                IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
-            Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
             inst_blocks++;
           }
         }
       }
     }
-
+#endif
   // Parameter instrumentation.
   for (auto &F : M) {
     if (F.isVarArg())
@@ -231,42 +224,39 @@ bool AFLCoverage::runOnModule(Module &M) {
     std::vector<std::pair<Value *, Value *>> instrumentPairs;
     if (intParms.size() > 1) 
       for( unsigned i = 0 ; i < intParms.size() - 1; i++) 
-        for (unsigned j = i; j < intParms.size(); j++) 
-          instrumentPairs.push_back(std::make_pair(intParms[i], intParms[j]));
+        for (unsigned j = i + 1; j < intParms.size(); j++) 
+          if (intParms[i]->getType() == intParms[j]->getType())
+            instrumentPairs.push_back(std::make_pair(intParms[i], intParms[j]));
 
     if (ptrParms.size() > 1) 
       for( unsigned i = 0 ; i < ptrParms.size() - 1; i++) 
-        for (unsigned j = i; j < ptrParms.size(); j++) 
-          instrumentPairs.push_back(std::make_pair(ptrParms[i], ptrParms[j]));
+        for (unsigned j = i + 1; j < ptrParms.size(); j++) 
+          if (ptrParms[i]->getType() == ptrParms[j]->getType())
+            instrumentPairs.push_back(std::make_pair(ptrParms[i], ptrParms[j]));
 
     for (auto &P : instrumentPairs) {
       // Each P is its own instrument point. 
       Value *RHS = P.first; 
       Value *LHS = P.second;
 
-      unsigned int cur_loc = AFL_R(MAP_SIZE);
+      unsigned int cur_loc = AFL_R(MAP_SIZE/4) + (MAP_SIZE - (MAP_SIZE/4));
 
       ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
-      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
-      PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
-
       LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      Value *MapPtrIdx =
-        IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+      Value *MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
  
       if (RHS->getType()->isPointerTy()) {
         LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
         Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-      
-        Value *RTBC = IRB.CreateBitCast(RHS, IRB.getInt64Ty());
-        Value *LTBC = IRB.CreateBitCast(LHS, IRB.getInt64Ty());
-        Value *IsNull = IRB.CreateICmpEQ(RTBC, LTBC);
-        Value *IsNullV = ConstantInt::get(IRB.getInt8Ty(), 1);
-        Value *IsNonNullV = ConstantInt::get(IRB.getInt8Ty(), 2);
-        Value *SelectedV = IRB.CreateSelect(IsNull, IsNullV, IsNonNullV);
+     
+        Value *RTBC = IRB.CreatePtrToInt(RHS, IRB.getInt64Ty());
+        Value *LTBC = IRB.CreatePtrToInt(LHS, IRB.getInt64Ty());
+        Value *IsEq = IRB.CreateICmpEQ(RTBC, LTBC);
+        Value *IsEqV = ConstantInt::get(IRB.getInt8Ty(), 1);
+        Value *IsNonEqV = ConstantInt::get(IRB.getInt8Ty(), 2);
+        Value *SelectedV = IRB.CreateSelect(IsEq, IsEqV, IsNonEqV);
         Value *ORedV = IRB.CreateOr(Counter, SelectedV);
 
         IRB.CreateStore(ORedV, MapPtrIdx)
@@ -275,40 +265,34 @@ bool AFLCoverage::runOnModule(Module &M) {
         LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
         Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
  
-        //Value *Z = ConstantInt::get(RV->getType(), 0); 
-        Value *LHSi = IRB.CreateSExt(LHS, IRB.getInt64Ty());
-        Value *RHSi = IRB.CreateSExt(RHS, IRB.getInt64Ty());
-        Value *LeqR = IRB.CreateICmpEQ(LHSi, RHSi);
-        Value *LltR = IRB.CreateICmpSLT(LHSi, RHSi);
-        Value *LgtR = IRB.CreateICmpSGT(LHSi, RHSi);
+        Value *LeqR = IRB.CreateICmpEQ(LHS, RHS);
+        Value *LltR = IRB.CreateICmpSLT(LHS, RHS);
+        Value *LgtR = IRB.CreateICmpSGT(LHS, RHS);
 
         Value *IsLEqR = ConstantInt::get(IRB.getInt8Ty(), 1);
         Value *IsNotLEqR = ConstantInt::get(IRB.getInt8Ty(), 2);
-        Value *IsLltR = ConstantInt::get(IRB.getInt8Ty(), 3);
-        Value *IsNotLltR = ConstantInt::get(IRB.getInt8Ty(), 4);
-        Value *IsLgtR = ConstantInt::get(IRB.getInt8Ty(), 5);
-        Value *IsNotLgtR = ConstantInt::get(IRB.getInt8Ty(), 6);
+        Value *IsLltR = ConstantInt::get(IRB.getInt8Ty(), 4);
+        Value *IsNotLltR = ConstantInt::get(IRB.getInt8Ty(), 8);
+        Value *IsLgtR = ConstantInt::get(IRB.getInt8Ty(), 16);
+        Value *IsNotLgtR = ConstantInt::get(IRB.getInt8Ty(), 32);
 
         Value *S1v = IRB.CreateSelect(LeqR, IsLEqR, IsNotLEqR);
         Value *S2v = IRB.CreateSelect(LltR, IsLltR, IsNotLltR);
         Value *S3v = IRB.CreateSelect(LgtR, IsLgtR, IsNotLgtR);
         Value *t1 = IRB.CreateOr(S1v, S2v);
-        Value *t2 = IRB.CreateOr(S3v, t1);
+        Value *t2 = IRB.CreateOr(t1, S3v);
         Value *ORedV = IRB.CreateOr(Counter, t2);
 
         IRB.CreateStore(ORedV, MapPtrIdx)
           ->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       }
 
-      StoreInst *Store =
-        IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
-      Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
       inst_blocks++;
     }
   }
 
   // Edge instrumentation. 
+#if 0
   for (auto &F : M)
     for (auto &BB : F) {
 
@@ -353,7 +337,7 @@ bool AFLCoverage::runOnModule(Module &M) {
       inst_blocks++;
 
     }
-
+#endif
   /* Say something nice. */
 
   if (!be_quiet) {

@@ -21,17 +21,20 @@
 int main(int argc, char** argv) {
 
   char buf[8];
+  int k;
 
   if (read(0, buf, 8) < 1) {
     printf("Hum?\n");
     exit(1);
   }
 
-  if (buf[0] == '0')
+  if (buf[0] == '0') {
     printf("Looks like a zero to me!\n");
-  else
+    k = 0;
+  } else {
     printf("A non-zero value? How quaint!\n");
+    k = 1;
+  }
 
-  exit(0);
-
+  return k;
 }
