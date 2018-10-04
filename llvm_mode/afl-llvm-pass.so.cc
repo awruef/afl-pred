@@ -84,6 +84,8 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   char* inst_ratio_str = getenv("AFL_INST_RATIO");
   unsigned int inst_ratio = 100;
+  unsigned int p_inst_ratio = 25;
+  unsigned int r_inst_ratio = 25;
 
   if (inst_ratio_str) {
 
@@ -100,15 +102,14 @@ bool AFLCoverage::runOnModule(Module &M) {
       new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
                          GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
 
-  /*GlobalVariable *AFLPrevLoc = new GlobalVariable(
+  GlobalVariable *AFLPrevLoc = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc",
-      0, GlobalVariable::GeneralDynamicTLSModel, 0, false);*/
+      0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
   /* Instrument all the things! */
 
   int inst_blocks = 0;
 
-#if 0
   // Return value instrumentation. 
   for (auto &F : M) 
     for (auto &BB : F) {
@@ -116,7 +117,12 @@ bool AFLCoverage::runOnModule(Module &M) {
         if (ReturnInst *R = dyn_cast<ReturnInst>(&I)) {
           if (Value *RV = R->getReturnValue()) {
             
-            if (AFL_R(100) >= inst_ratio) continue;
+            if (AFL_R(100) >= r_inst_ratio) continue;
+
+            uint64_t tw = M.getDataLayout().getTypeAllocSizeInBits(RV->getType());
+            if (!(RV->getType()->isIntegerTy() && tw > 1) ||
+                !(RV->getType()->isPointerTy()) )
+              continue;
 
             // We want to insert instrumentation before the return value.
             IRBuilder<> IRB(R); 
@@ -130,15 +136,7 @@ bool AFLCoverage::runOnModule(Module &M) {
             MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
             Value *MapPtrIdx = IRB.CreateGEP(MapPtr, CurLoc);
 
-            // Is the return value a pointer, or not? 
-            if (RV->getType()->isFloatTy() || 
-                (RV->getType()->isIntegerTy() && !(RV->getType()->getScalarSizeInBits() > 1)) ||
-                RV->getType()->isStructTy() || 
-                RV->getType()->isVectorTy())
-            {
-              // If it's one of these cases, then skip it. 
-              continue;
-            } else if (RV->getType()->isPointerTy()) {
+            if (RV->getType()->isPointerTy()) {
               // Add instrumentation that checks whether or not the value is 
               // NULL, and ANDs it into the current map idx.
              
@@ -194,7 +192,7 @@ bool AFLCoverage::runOnModule(Module &M) {
         }
       }
     }
-#endif
+
   // Parameter instrumentation.
   for (auto &F : M) {
     if (F.isVarArg())
@@ -238,6 +236,8 @@ bool AFLCoverage::runOnModule(Module &M) {
       // Each P is its own instrument point. 
       Value *RHS = P.first; 
       Value *LHS = P.second;
+    
+      if (AFL_R(100) >= p_inst_ratio) continue;
 
       unsigned int cur_loc = AFL_R(MAP_SIZE/4) + (MAP_SIZE - (MAP_SIZE/4));
 
@@ -295,7 +295,6 @@ bool AFLCoverage::runOnModule(Module &M) {
   }
 
   // Edge instrumentation. 
-#if 0
   for (auto &F : M)
     for (auto &BB : F) {
 
@@ -340,7 +339,6 @@ bool AFLCoverage::runOnModule(Module &M) {
       inst_blocks++;
 
     }
-#endif
   /* Say something nice. */
 
   if (!be_quiet) {
